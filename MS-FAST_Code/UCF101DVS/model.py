@@ -179,7 +179,7 @@ class MS_STF(nn.Module):
             x_res = tempro_fusion.reshape(T, B, C, H, W)
             tempro_fusion = self.MSTF_lif[i](x_res, alpha)
             tempro_fusion = tempro_fusion.permute(3, 4, 1, 2, 0).contiguous()
-            tempro_fusion = self.MSTF[-1](tempro_fusion.flatten(0, 2))
+            tempro_fusion = self.MSTF[i](tempro_fusion.flatten(0, 2))
             head_output.append(tempro_fusion)
         x = torch.stack((list((head_output))), dim=0).reshape(-1, H, W, B, C, T)
         x = x.permute(0, 5, 3, 4, 1, 2).contiguous()
