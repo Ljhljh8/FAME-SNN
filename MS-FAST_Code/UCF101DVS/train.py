@@ -264,7 +264,7 @@ def split_to_train_test_set(train_ratio: float, origin_dataset: torch.utils.data
     return torch.utils.data.Subset(origin_dataset, train_idx), torch.utils.data.Subset(origin_dataset, test_idx)
 
 
-
+from torch.nn.utils import clip_grad_norm_
 def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, print_freq, scaler=None, T_train=None, aug=None, trival_aug=None, mixup_fn=None):
     model.train()
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -313,6 +313,7 @@ def train_one_epoch(model, criterion, optimizer, data_loader, device, epoch, pri
 
         if scaler is not None:
             scaler.scale(loss).backward()
+            clip_grad_norm_(model.parameters(), max_norm=1.0)
             scaler.step(optimizer)
             scaler.update()
 
