@@ -271,7 +271,7 @@ class vit_snn(nn.Module):
 
         self.iter_num = 0
 
-        self.step_size = 197
+        self.step_size = 198
         self.alpha = 1.0
 
 
