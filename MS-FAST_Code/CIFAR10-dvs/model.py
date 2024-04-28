@@ -16,7 +16,7 @@ __all__ = ['MS_FAST']
 
 
 v_th = 0.5
-tau_thr = 2.0
+tau_thr = 1.5
 import torch
 import torch.fft
 
@@ -115,7 +115,7 @@ class ASFF(nn.Module):
         o2_fp = o2_real - o2_imag
         o2_fn = o2_real + o2_imag
         x = ((origin_ffted_so * o2_fp) - (origin_ffted_se * o2_fn))
-        x = F.softshrink(x, 0.06)
+        x = F.softshrink(x, 0.03)
 
         x = self.hartley_transform(x)
         x = x.type(dtype)
@@ -146,7 +146,7 @@ class MS_STF(nn.Module):
         self.MSSF = nn.ModuleList([nn.Sequential(nn.Conv2d(in_ch, out_channel, kernel_size=1, bias=False),
                                                  nn.BatchNorm2d(out_channel)) for in_ch in in_channel_list])
         self.MSTF_lif = nn.ModuleList(
-            [neuron.STHLIFNode(step_mode='m', tau=2.0, v_threshold=1.0, detach_reset=True, backend='cupy')
+            [neuron.STHLIFNode(step_mode='m', tau=tau_thr, v_threshold=1.0, detach_reset=True, backend='cupy')
              for _ in in_channel_list])
         self.MSTF = nn.ModuleList([nn.Sequential(nn.Conv1d(out_channel, out_channel, kernel_size=1, bias=False),
                                                  nn.BatchNorm1d(out_channel)) for _ in in_channel_list])
@@ -271,7 +271,7 @@ class vit_snn(nn.Module):
         self.step_size = 281
         self.init_scale = 1.0
         self.alpha = self.init_scale
-        self.STH_epoch = 34
+        self.STH_epoch = 20
         self.num_classes = num_classes
         self.depths = depths
         self.T = T
