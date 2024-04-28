@@ -16,7 +16,7 @@ __all__ = ['MS_FAST']
 
 
 v_th = 0.5
-tau_thr = 1.5
+tau_thr = 2.0
 import torch
 import torch.fft
 
