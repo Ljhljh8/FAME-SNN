@@ -113,7 +113,7 @@ class ASFF(nn.Module):
         o2_fp = o2_real - o2_imag
         o2_fn = o2_real + o2_imag
         x = ((origin_ffted_so * o2_fp) - (origin_ffted_se * o2_fn))
-        x = F.softshrink(x, 0.05)
+        x = F.softshrink(x, 0.06)
 
         x = self.hartley_transform(x)
         x = x.type(dtype)
