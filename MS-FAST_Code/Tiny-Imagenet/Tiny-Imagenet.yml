@@ -1,6 +1,6 @@
 dataset: Tiny-Imagenet
 num_classes: 200
-img_size: 64
+img_size: 224
 patch_size: 8
 mlp_ratio: 4
 mean:
