@@ -12,6 +12,7 @@ from spikingjelly.clock_driven import functional
 import torch
 import torch.nn as nn
 import torchvision.utils
+from torchvision import transforms
 from torch.nn.parallel import DistributedDataParallel as NativeDDP
 
 from timm.data import create_dataset, resolve_data_config, Mixup, FastCollateMixup, AugMixDataset, create_loader
@@ -474,12 +475,19 @@ def main():
         _logger.info('Scheduled epochs: {}'.format(num_epochs))
 
     # create the train and eval datasets
+    train_transform = transforms.Compose([
+        transforms.Resize((224, 224), antialias=True),
+    ])
+    test_transform = transforms.Compose([
+        transforms.Resize((224, 224), antialias=True),
+    ])
     dataset_train = create_dataset(
         args.dataset,
         root=args.data_dir, split=args.train_split, is_training=True,
-        batch_size=args.batch_size, repeats=args.epoch_repeats)
+        batch_size=args.batch_size, repeats=args.epoch_repeats, transform=train_transform)
     dataset_eval = create_dataset(
-        args.dataset, root=args.data_dir, split=args.val_split, is_training=False, batch_size=args.batch_size)
+        args.dataset, 
+        root=args.data_dir, split=args.val_split, is_training=False, batch_size=args.batch_size, transform=test_transform)
 
     # setup mixup / cutmix
     collate_fn = None
