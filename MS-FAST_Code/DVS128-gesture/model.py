@@ -114,7 +114,7 @@ class ASFF(nn.Module):
         o2_fp = o2_real - o2_imag
         o2_fn = o2_real + o2_imag
         x = ((origin_ffted_so * o2_fp) - (origin_ffted_se * o2_fn))
-        x = F.softshrink(x, 0.02)
+
 
         x = self.hartley_transform(x)
         x = x.type(dtype)
@@ -256,7 +256,7 @@ class vit_snn(nn.Module):
                  ):
         super().__init__()
         self.iter_num = 0
-        self.step_size = 24
+        self.step_size = 25
         self.init_scale = 1.0
         # self.init_scale =0.0
         self.alpha = self.init_scale
