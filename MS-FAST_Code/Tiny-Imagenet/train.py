@@ -130,7 +130,7 @@ parser.add_argument('--momentum', type=float, default=0.9, metavar='M',
                     help='Optimizer momentum (default: 0.9)')
 parser.add_argument('--weight-decay', type=float, default=0.0001,
                     help='weight decay (default: 0.0001)')
-parser.add_argument('--clip-grad', type=float, default=None, metavar='NORM',
+parser.add_argument('--clip-grad', type=float, default=2.0, metavar='NORM',
                     help='Clip gradient norm (default: None, no clipping)')
 parser.add_argument('--clip-mode', type=str, default='norm',
                     help='Gradient clipping mode. One of ("norm", "value", "agc")')
