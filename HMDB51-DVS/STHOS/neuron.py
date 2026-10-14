@@ -495,9 +495,25 @@ class STHLIFNode(BaseNode):
             return spike
 
     def multi_step_forward(self, x_seq: torch.Tensor, alpha):
+        if not self.training:
+            alpha = 0.0
         if self.training:
             if self.backend == 'torch':
-                return super().multi_step_forward(x_seq)
+                # Preserve the fixed surrogate derivative and reset from hard spikes.
+                self.v_float_to_tensor(x_seq[0])
+                spikes, voltages = [], []
+                for x in x_seq:
+                    self.neuronal_charge(x)
+                    hard = self.neuronal_fire()
+                    continuous = torch.sigmoid(4.0 * (self.v - self.v_threshold))
+                    mixed = (1.0 - alpha) * hard + alpha * continuous
+                    spikes.append(hard + (mixed - hard).detach())
+                    self.neuronal_reset(hard)
+                    if self.store_v_seq:
+                        voltages.append(self.v)
+                if self.store_v_seq:
+                    self.v_seq = torch.stack(voltages)
+                return torch.stack(spikes)
             elif self.backend == 'cupy':
 
                 hard_reset = self.v_reset is not None

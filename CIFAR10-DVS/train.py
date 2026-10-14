@@ -376,6 +376,7 @@ def load_data(dataset_dir, distributed, T):
 def main():
 
     args, args_text = _parse_args()
+    os.makedirs("logs", exist_ok=True)
     setup_default_logging(log_path=f"./logs/training_{datetime.now().strftime('%Y%m%d_%H%M%S')}_sthos_{args.STHOS}.log")
     if args.log_wandb:
         if has_wandb:
@@ -783,7 +784,7 @@ def train_one_epoch(
             input = input.contiguous(memory_format=torch.channels_last)
 
         with amp_autocast():
-            output = model(input, len(loader), epoch)
+            output = model(input, len(loader), epoch, batch_idx=batch_idx)
             loss = loss_fn(output, target)
 
         pred_choice = output.data.max(1)[1]

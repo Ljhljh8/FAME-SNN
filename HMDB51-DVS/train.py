@@ -10,6 +10,7 @@ from collections import OrderedDict
 from contextlib import suppress
 from datetime import datetime
 from spikingjelly.clock_driven import functional
+from spikingjelly.clock_driven import functional as snn_functional
 
 import torch, spikingjelly
 import torch.nn as nn
@@ -100,7 +101,7 @@ parser.add_argument('--pretrained', action='store_true', default=False,
 parser.add_argument('--initial-checkpoint', default='', type=str, metavar='PATH',
                     help='Initialize model from this checkpoint (default: none)')
 
-parser.add_argument('--resume', default='/media/think/data1/ljh/FAME-SNN/HMDBdvs/output/train/20250121-152545-MS_FAST-224/model_best.pth.tar', type=str, metavar='PATH',
+parser.add_argument('--resume', default='', type=str, metavar='PATH',
                     help='Resume full model and optimizer state from checkpoint (default: none)')
 parser.add_argument('--no-resume-opt', action='store_true', default=False,
                     help='prevent resume of optimizer state when resuming model')
@@ -297,6 +298,9 @@ parser.add_argument('--log-wandb', action='store_true', default=False,
 parser.add_argument("--Test_only",dest="test_only",default=False,help="Only test the model",action="store_true")
 
 
+parser.add_argument('--cache-root', default='', help='Existing temporal frame cache root')
+
+
 def _parse_args():
     # Do we have a config file to parse?
     args_config, remaining = config_parser.parse_known_args()
@@ -412,7 +416,7 @@ def unpack_mix_param(args):
     return mix_up, cut_mix, event_mix, beta, prob, num, num_classes, noise, gaussian_n
 
 
-def get_HMDBDVS_data(batch_size, T, **kwargs):
+def get_HMDBDVS_data(batch_size, T, data_root, cache_root, distributed=False, seed=42, **kwargs):
     sensor_size = HMDBDVS.sensor_size
 
     train_transform = transforms.Compose([
@@ -425,9 +429,12 @@ def get_HMDBDVS_data(batch_size, T, **kwargs):
         tonic.transforms.ToFrame(n_time_bins=T, sensor_size=sensor_size),
     ])
 
-    train_dataset = HMDBDVS('/home/think/ljh_datasets/HMDBDVS/train/', transform=train_transform)
-    # 1
-    test_dataset = HMDBDVS('/home/think/ljh_datasets/HMDBDVS/test/', transform=test_transform)
+    train_cache = os.path.join(cache_root, 'train_cache_%d' % T)
+    test_cache = os.path.join(cache_root, 'test_cache_%d' % T)
+    if not os.path.isdir(train_cache) or not os.path.isdir(test_cache):
+        raise FileNotFoundError('Required temporal caches missing: ' + cache_root)
+    train_dataset = None
+    test_dataset = None
 
     train_transform = transforms.Compose([
         to_float_tensor,
@@ -450,10 +457,10 @@ def get_HMDBDVS_data(batch_size, T, **kwargs):
             train_transform.transforms.insert(2, RandAugment(m=m, n=n))
 
     train_dataset = DiskCachedDataset(train_dataset,
-                                      cache_path='/home/think/ljh_datasets/HMDBDVS/train_cache/',
+                                      cache_path=train_cache,
                                       transform=train_transform)
     test_dataset = DiskCachedDataset(test_dataset,
-                                     cache_path='/home/think/ljh_datasets/HMDBDVS/test_cache/',
+                                     cache_path=test_cache,
                                      transform=test_transform)
 
     mix_up, cut_mix, event_mix, beta, prob, num, num_classes, noise, gaussian_n = unpack_mix_param(kwargs)
@@ -484,15 +491,19 @@ def get_HMDBDVS_data(batch_size, T, **kwargs):
                               num_class=num_classes,
                               noise=noise)
 
+    train_sampler = (torch.utils.data.distributed.DistributedSampler(train_dataset, seed=seed)
+                     if distributed else torch.utils.data.RandomSampler(train_dataset))
+    test_sampler = (list(range(torch.distributed.get_rank(), len(test_dataset), torch.distributed.get_world_size()))
+                    if distributed else torch.utils.data.SequentialSampler(test_dataset))
     train_loader = torch.utils.data.DataLoader(
         train_dataset, batch_size=batch_size,
-        shuffle=True,
+        sampler=train_sampler,
         pin_memory=True, drop_last=True, num_workers=8
     )
 
     test_loader = torch.utils.data.DataLoader(
         test_dataset, batch_size=batch_size,
-        shuffle=False,
+        sampler=test_sampler,
         pin_memory=True, drop_last=False, num_workers=2
     )
 
@@ -500,6 +511,7 @@ def get_HMDBDVS_data(batch_size, T, **kwargs):
 
 
 def main():
+    os.makedirs("logs", exist_ok=True)
     setup_default_logging(log_path=f"./logs/training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
     args, args_text = _parse_args()
 
@@ -674,7 +686,7 @@ def main():
         _logger.info('Scheduled epochs: {}'.format(num_epochs))
 
     data_path = args.data_dir
-    loader_train, loader_eval, mixup_active = get_HMDBDVS_data(args.batch_size, T=8)
+    loader_train, loader_eval, mixup_active = get_HMDBDVS_data(args.batch_size, T=args.time_step, data_root=args.data_dir, cache_root=args.cache_root, distributed=args.distributed, seed=args.seed)
 
     # setup mixup / cutmix
     collate_fn = None
@@ -844,22 +856,24 @@ def main():
         pass
     if best_metric is not None:
         _logger.info('*** Best metric: {0} (epoch {1})'.format(best_metric, best_epoch))
-    print(args)
-    ts1 = time.time()
-    import sys
-    sys.path.append("..")
-    import energy_consumption_calculation
-    from energy_consumption_calculation.flops_counter import get_model_complexity_info
-    # using real data
-    Nops, Nparams = get_model_complexity_info(model, (2, 224, 224), loader_eval, as_strings=True,
-                                              print_per_layer_stat=True, verbose=True, syops_units='Mac',
-                                              param_units=' ', output_precision=3)
-    # using random input
-    #Nops, Nparams = get_model_complexity_info(model, (3,  32, 32), dataloader=None, as_strings=True, print_per_layer_stat=True, verbose=True, syops_units='Mac', param_units=' ', output_precision=3)
-    print("Nops: ", Nops)
-    print("Nparams: ", Nparams)
-    t_cost = (time.time() - ts1) / 60
-    print(f"Time cost: {t_cost} min")
+    # Optional legacy energy profiling; enable explicitly if its package is installed.
+    if False:
+        print(args)
+        ts1 = time.time()
+        import sys
+        sys.path.append("..")
+        import energy_consumption_calculation
+        from energy_consumption_calculation.flops_counter import get_model_complexity_info
+        # using real data
+        Nops, Nparams = get_model_complexity_info(model, (2, 224, 224), loader_eval, as_strings=True,
+                                                  print_per_layer_stat=True, verbose=True, syops_units='Mac',
+                                                  param_units=' ', output_precision=3)
+        # using random input
+        #Nops, Nparams = get_model_complexity_info(model, (3,  32, 32), dataloader=None, as_strings=True, print_per_layer_stat=True, verbose=True, syops_units='Mac', param_units=' ', output_precision=3)
+        print("Nops: ", Nops)
+        print("Nparams: ", Nparams)
+        t_cost = (time.time() - ts1) / 60
+        print(f"Time cost: {t_cost} min")
 
 
 def train_one_epoch(
@@ -870,7 +884,8 @@ def train_one_epoch(
         # if args.prefetcher and loader.collate_fn.mixup_enabled:
         #     loader.collate_fn.mixup_enabled = False
         # elif mixup_fn is not None:
-        mixup_fn.mixup_enabled = False
+        if mixup_fn is not None:
+            mixup_fn.mixup_enabled = False
 
     second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
     batch_time_m = AverageMeter()
@@ -911,16 +926,17 @@ def train_one_epoch(
             input = input.contiguous(memory_format=torch.channels_last)
 
         with amp_autocast():
-            output = model(input, len(loader), epoch)
+            output = model(input, len(loader), epoch, batch_idx=batch_idx)
             # target = torch.nn.functional.one_hot(target,args.num_classes)
             loss = loss_fn(output, target)
+        if not torch.isfinite(loss):
+            raise FloatingPointError('non-finite training loss')
 
         pred_choice = output.data.max(1)[1]
         labe = target
         correct = pred_choice.eq(labe.long().data).cpu().sum()
         mean_correct.append(correct.item() / float(input.size()[0]))
-        if not args.distributed:
-            losses_m.update(loss.item(), input.size(0))
+        losses_m.update(loss.item(), input.size(0))
 
         optimizer.zero_grad()
         if loss_scaler is not None:
@@ -951,9 +967,6 @@ def train_one_epoch(
             lrl = [param_group['lr'] for param_group in optimizer.param_groups]
             lr = sum(lrl) / len(lrl)
             train_instance_acc = np.mean(mean_correct) * 100
-            if args.distributed:
-                reduced_loss = reduce_tensor(loss.data, args.world_size)
-                losses_m.update(reduced_loss.item(), input.size(0))
 
             if args.local_rank == 0:
                 _logger.info(
@@ -996,73 +1009,47 @@ def train_one_epoch(
     if hasattr(optimizer, 'sync_lookahead'):
         optimizer.sync_lookahead()
 
-    return OrderedDict([('loss', losses_m.avg), ('acc', train_instance_acc)])
+    totals = torch.tensor([losses_m.sum, losses_m.count, sum(mean_correct), len(mean_correct)],
+                          device='cuda', dtype=torch.float64)
+    if args.distributed:
+        torch.distributed.all_reduce(totals)
+    return OrderedDict(loss=(totals[0] / totals[1]).item(),
+                       acc=(100 * totals[2] / totals[3]).item())
 
 
 def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix=''):
-    batch_time_m = AverageMeter()
-    losses_m = AverageMeter()
-    top1_m = AverageMeter()
-    top5_m = AverageMeter()
-
+    # Evaluate each real sample exactly once; no padded DistributedSampler labels.
     model.eval()
-
-    end = time.time()
-    last_idx = len(loader) - 1
+    core = model.module if hasattr(model, 'module') else model
+    if args.distributed:
+        for buffer in core.buffers():
+            torch.distributed.broadcast(buffer, 0)
+    totals = torch.zeros(4, device='cuda', dtype=torch.float64)
     with torch.no_grad():
-        for batch_idx, (input, target) in enumerate(loader):
-            last_batch = batch_idx == last_idx
-            # if not args.prefetcher:
-            input = input.cuda()
-            target = target.cuda()
-            if args.channels_last:
-                input = input.contiguous(memory_format=torch.channels_last)
-
-            input = input.float()
+        for input, target in loader:
+            input, target = input.cuda().float(), target.cuda()
             with amp_autocast():
-                output = model(input, )
-            if isinstance(output, (tuple, list)):
-                output = output[0]
-
-            # augmentation reduction
-            reduce_factor = args.tta
-            if reduce_factor > 1:
-                output = output.unfold(0, reduce_factor, reduce_factor).mean(dim=2)
-                target = target[0:target.size(0):reduce_factor]
-
-            loss = loss_fn(output, target)
-            spikingjelly.clock_driven.functional.reset_net(model)
-
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
-
-            if args.distributed:
-                reduced_loss = reduce_tensor(loss.data, args.world_size)
-                acc1 = reduce_tensor(acc1, args.world_size)
-                acc5 = reduce_tensor(acc5, args.world_size)
-            else:
-                reduced_loss = loss.data
-
-            torch.cuda.synchronize()
-
-            losses_m.update(reduced_loss.item(), input.size(0))
-            top1_m.update(acc1.item(), output.size(0))
-            top5_m.update(acc5.item(), output.size(0))
-
-            batch_time_m.update(time.time() - end)
-            end = time.time()
-            if args.local_rank == 0 and (last_batch):
-                log_name = 'Test' + log_suffix
-                _logger.info(
-                    '{0}: [{1:>4d}/{2}]  '
-                    'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})  '
-                    'Loss: {loss.val:>7.4f} ({loss.avg:>6.4f})  '
-                    'Acc@1: {top1.val:>7.4f} ({top1.avg:>7.4f})  '
-                    'Acc@5: {top5.val:>7.4f} ({top5.avg:>7.4f})'.format(
-                        log_name, batch_idx, last_idx, batch_time=batch_time_m,
-                        loss=losses_m, top1=top1_m, top5=top5_m))
-
-    metrics = OrderedDict([ ('top1', top1_m.avg), ('top5', top5_m.avg), ('loss', losses_m.avg),])
-
+                output = core(input)
+                loss = loss_fn(output, target)
+            if not torch.isfinite(loss):
+                raise FloatingPointError('non-finite validation loss')
+            snn_functional.reset_net(core)
+            prediction = output.topk(5, dim=1).indices
+            correct = prediction.eq(target[:, None])
+            totals += torch.stack((loss.double() * target.numel(),
+                                   correct[:, 0].sum().double(),
+                                   correct.any(dim=1).sum().double(),
+                                   torch.tensor(target.numel(), device='cuda', dtype=torch.float64)))
+    if args.distributed:
+        torch.distributed.all_reduce(totals)
+    loss_sum, top1, top5, count = totals.tolist()
+    if count != len(loader.dataset):
+        raise RuntimeError('evaluation sample count mismatch: %s != %s' % (count, len(loader.dataset)))
+    metrics = OrderedDict(top1=100.0 * top1 / count, top5=100.0 * top5 / count,
+                          loss=loss_sum / count, samples=int(count))
+    if args.rank == 0:
+        _logger.info('Test%s: samples=%d Loss=%.6f Acc@1=%.6f Acc@5=%.6f',
+                     log_suffix, count, metrics['loss'], metrics['top1'], metrics['top5'])
     return metrics
 
 

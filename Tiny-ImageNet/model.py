@@ -17,7 +17,6 @@ __all__ = ['MS_FAST']
 
 tau_thr = 2.0
 
-from diversebranchblock import DiverseBranchBlock1D, DiverseBranchBlock2D
 class MLP(nn.Module):
     def __init__(self, in_features, hidden_features=None, out_features=None, drop=0.):
         super().__init__()
@@ -50,81 +49,65 @@ class MLP(nn.Module):
         return x
 
 
+def hartley2(x, operation):
+    """Orthonormal Hartley components/inverse or modular frequency reflection."""
+    if operation == 'reflect':
+        return torch.roll(torch.flip(x, dims=(-2, -1)), shifts=(1, 1), dims=(-2, -1))
+    if operation not in ('forward', 'inverse'):
+        raise ValueError('unknown Hartley operation: %s' % operation)
+    spectrum = torch.fft.fft2(x, dim=(-2, -1), norm='ortho')
+    if operation == 'forward':
+        return spectrum.real, -spectrum.imag
+    return spectrum.real - spectrum.imag
+
+
 class ASFF(nn.Module):
+    """Revised Hartley GIF, with the dataset's original hidden capacity."""
     def __init__(self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0., proj_drop=0., sr_ratio=1):
         super().__init__()
-        assert dim % num_heads == 0, f"dim {dim} should be divided by num_heads {num_heads}."
+        if dim % num_heads:
+            raise ValueError("dim must be divisible by num_heads")
         self.hidden_size = dim
         self.num_blocks = num_heads
-        self.block_size = self.hidden_size // self.num_blocks
+        self.block_size = dim // num_heads
         self.hidden_size_factor = 1
         self.scale = 0.002
-        self.ASSF_th = 0.5
+        self.softshrink = 0.06
+        self.w1 = nn.Parameter(self.scale * torch.randn(
+            1, num_heads, self.block_size, self.block_size * self.hidden_size_factor))
 
-        self.w1 = nn.Parameter(
-            self.scale * torch.randn(1, self.num_blocks, self.block_size, self.block_size * self.hidden_size_factor))
-        #self.ASSF_bn = nn.BatchNorm2d(dim)
-        self.ASSF_act = neuron.STHLIFNode(step_mode='m', tau=tau_thr, v_threshold=self.ASSF_th, detach_reset=True, backend='cupy')
-
-        self.bn1_1 = nn.BatchNorm2d(dim * self.hidden_size_factor)
-        self.act11 = neuron.STHLIFNode(step_mode='m', tau=tau_thr, v_threshold=self.ASSF_th, detach_reset=True, backend='cupy')
-        self.bn1_2 = nn.BatchNorm2d(dim * self.hidden_size_factor)
-        self.act12 = neuron.STHLIFNode(step_mode='m', tau=tau_thr, v_threshold=self.ASSF_th, detach_reset=True, backend='cupy')
-        self.bn2_1 = nn.BatchNorm2d(dim)
-        self.act21 = neuron.STHLIFNode(step_mode='m', tau=tau_thr, v_threshold=self.ASSF_th, detach_reset=True, backend='cupy')
-        self.bn2_2 = nn.BatchNorm2d(dim)
-        self.act22 = neuron.STHLIFNode(step_mode='m', tau=tau_thr, v_threshold=self.ASSF_th, detach_reset=True, backend='cupy')
-
-        #self.ASSF1_bn = nn.BatchNorm2d(dim)
-    def hartley_transform(self, x):
-        # Utilize the relationship between Fourier Transform and Hartley Transform for the fast Hartley Transform.
-        return  torch.fft.fft2((x), dim = (3, 4), norm="ortho")
-
-    def inverse_hartley_transform(self, x):
-        # Since the Hartley Transform is self-inverse, we can directly apply the Hartley Transform again to obtain the inverse transform.
-        x =  self.hartley_transform(x)
-        return (x.real - x.imag)
+        self.bn1 = nn.BatchNorm2d(dim * self.hidden_size_factor)
+        self.bn2 = nn.BatchNorm2d(dim)
+        # BNinitial / neutral-init, applied after the final kernel BN is built.
+        nn.init.constant_(self.bn2.weight, 0.01)
+        nn.init.constant_(self.bn2.bias, 1.0 + self.softshrink)
+        self.input_lif = neuron.STHLIFNode(step_mode='m', tau=tau_thr, v_threshold=0.5, detach_reset=True, backend='cupy')
+        self.kernel_input_lif = neuron.STHLIFNode(step_mode='m', tau=tau_thr, v_threshold=0.5, detach_reset=True, backend='cupy')
+        self.feature_even_lif = neuron.STHLIFNode(step_mode='m', tau=tau_thr, v_threshold=0.5, detach_reset=True, backend='cupy')
+        self.feature_odd_lif = neuron.STHLIFNode(step_mode='m', tau=tau_thr, v_threshold=0.5, detach_reset=True, backend='cupy')
+        self.hidden_activation = neuron.STHLIFNode(step_mode='m', tau=tau_thr, v_threshold=0.5, detach_reset=True, backend='cupy')
 
     def forward(self, x, alpha):
         T, B, C, H, W = x.shape
         dtype = x.dtype
-        x = x.float()
-        #x = self.ASSF_bn(x.flatten(0, 1)).reshape(T, B, C, H, W)
-        x = self.ASSF_act(x, alpha)
-        x = self.hartley_transform(x)
-
-        origin_ffted_so = self.act21(x.real, alpha)
-        origin_ffted_se = self.act22(x.imag, alpha)
-
-        x.real = origin_ffted_so
-        x.imag = origin_ffted_se
-        x = x.reshape(T * B, self.num_blocks, self.block_size, x.shape[3], x.shape[4])
-        o1_real = self.act11(
-            self.bn1_1((torch.einsum('bkihw,kio->bkohw', x.real, self.w1[0]) - \
-                        torch.einsum('bkihw,kio->bkohw', x.imag, self.w1[0])).flatten(1, 2)).reshape(T, B,self.num_blocks,self.block_size * self.hidden_size_factor,x.shape[3],x.shape[4])
-        , alpha).flatten(0, 1)
-        o1_imag = self.act12(
-            self.bn1_2((torch.einsum('bkihw,kio->bkohw', x.imag, self.w1[0]) + \
-                        torch.einsum('bkihw,kio->bkohw', x.real, self.w1[0])).flatten(1, 2)).reshape(T, B,self.num_blocks,self.block_size * self.hidden_size_factor,
-                                                                                                                      x.shape[3],x.shape[4]), alpha).flatten(0, 1)
-        o2_real = (self.bn2_1((torch.einsum('bkihw,kio->bkohw', o1_real, self.w1[0]) - \
-                               torch.einsum('bkihw,kio->bkohw', o1_imag, self.w1[0])).flatten(1, 2))
-                             .reshape(T, B,self.num_blocks,self.block_size,x.shape[3],x.shape[4]))
-        o2_imag = (self.bn2_2((torch.einsum('bkihw,kio->bkohw', o1_imag, self.w1[0]) + \
-                               torch.einsum('bkihw,kio->bkohw', o1_real, self.w1[0])).flatten(1, 2))
-                             .reshape(T, B,self.num_blocks,self.block_size,x.shape[3],x.shape[4]))
-
-        o2_real = F.softshrink(o2_real.reshape(T, B, C, o2_real.shape[4], o2_real.shape[5]), 0.06)
-        o2_imag = F.softshrink(o2_imag.reshape(T, B, C, o2_imag.shape[4], o2_imag.shape[5]), 0.06)
-
-        o2_fp = o2_real - o2_imag
-        o2_fn = o2_real + o2_imag
-        x = ((origin_ffted_so * o2_fp) - (origin_ffted_se * o2_fn))
-
-        x = self.inverse_hartley_transform(x)
-        x = x.type(dtype)
-        #x = self.ASSF1_bn(x.flatten(0, 1)).reshape(T, B, C, H, W)
-        return x
+        # Hartley operations and the learned frequency response use FP32 under AMP.
+        with torch.autocast(device_type=x.device.type, enabled=False):
+            source = self.input_lif(x.float(), alpha)
+            even, odd = hartley2(source, 'forward')
+            kernel_source = self.kernel_input_lif(even + odd, alpha)
+            feature_even = self.feature_even_lif(even, alpha)
+            feature_odd = self.feature_odd_lif(odd, alpha)
+            blocked = kernel_source.reshape(T * B, self.num_blocks, self.block_size, H, W)
+            stage1 = torch.einsum('bkihw,kio->bkohw', blocked, self.w1[0])
+            stage1 = self.bn1(stage1.flatten(1, 2)).reshape(T, B, C * self.hidden_size_factor, H, W)
+            hidden = self.hidden_activation(stage1, alpha).reshape(
+                T * B, self.num_blocks, self.block_size * self.hidden_size_factor, H, W)
+            stage2 = torch.einsum('bkihw,kio->bkohw', hidden, self.w1[0])
+            kernel = F.softshrink(self.bn2(stage2.flatten(1, 2)), self.softshrink).reshape(T, B, C, H, W)
+            # H(-K)[u,v] = H(K)[(-u) mod H, (-v) mod W].
+            reflected = hartley2(kernel, 'reflect')
+            mixed = kernel * feature_even + reflected * feature_odd
+            return hartley2(mixed, 'inverse').to(dtype)
 
 class GIF(nn.Module):
     def __init__(self, dim, num_heads, mlp_ratio=4., qkv_bias=False, qk_scale=None, drop=0., attn_drop=0.,
@@ -182,6 +165,28 @@ class SepConv(nn.Module):
         x = self.dwconv(x.flatten(0, 1))
         x = self.bn2(self.pwconv2(x)).reshape(T, B, -1, H, W)
         return x
+def split_contiguous_windows(x, num_windows):
+    """[T,B,C,H,W] -> [T/num_windows,num_windows*B,C,H,W]."""
+    T, B, C, H, W = x.shape
+    if num_windows < 1 or T % num_windows:
+        raise ValueError("T must be divisible by the window count")
+    window_length = T // num_windows
+    return (x.reshape(num_windows, window_length, B, C, H, W)
+            .permute(1, 0, 2, 3, 4, 5)
+            .reshape(window_length, num_windows * B, C, H, W))
+
+
+def restore_temporal_order(x, num_windows):
+    """[window_length,num_windows*B,C,H,W] -> [T,B,C,H,W]."""
+    window_length, window_batch, C, H, W = x.shape
+    if num_windows < 1 or window_batch % num_windows:
+        raise ValueError("window batch must be divisible by the window count")
+    B = window_batch // num_windows
+    return (x.reshape(window_length, num_windows, B, C, H, W)
+            .permute(1, 0, 2, 3, 4, 5)
+            .reshape(window_length * num_windows, B, C, H, W))
+
+
 class MS_STF(nn.Module):
     def __init__(self, in_channel_list, out_channel, ):
         super().__init__()
@@ -224,15 +229,19 @@ class MS_STF(nn.Module):
     def forward(self, x, alpha):
         head_output = []
         T, B, _, H, W = x[-1].shape
+        if any(n < 1 or T % n for n in self.multi_T):
+            raise ValueError("T must be divisible by every MS-STF window count")
         add_pre2corent = self.MSSF[-1](x[-1].flatten(0, 1))
-        tempro_fusion = self.MSTF_lif[-1](add_pre2corent.reshape(T // self.multi_T[-1], self.multi_T[-1] * B, -1, H, W),
-                                          alpha)
+        tempro_fusion = split_contiguous_windows(
+            add_pre2corent.reshape(T, B, -1, H, W), self.multi_T[-1]
+        )
+        tempro_fusion = self.MSTF_lif[-1](tempro_fusion, alpha)
 
         tempro_fusion = tempro_fusion.permute(3, 4, 1, 2, 0).contiguous()  # H*W*B, C, T
         tempro_fusion = self.MSTF[-1](tempro_fusion.flatten(0, 2))  # H*W*B, C, T
         tempro_fusion = tempro_fusion.view(H, W, B * self.multi_T[-1], -1, T // self.multi_T[-1]).permute(4, 2, 3, 0,
                                                                                                           1).contiguous()
-        tempro_fusion = tempro_fusion.reshape(T, B, -1, H, W)
+        tempro_fusion = restore_temporal_order(tempro_fusion, self.multi_T[-1])
 
         head_output.append((tempro_fusion))
         for i in range(len(x) - 2, -1, -1):
@@ -246,14 +255,16 @@ class MS_STF(nn.Module):
                 tempro_fusion = ((self.mp1(tempro_fusion)))
             elif i == 0:
                 tempro_fusion = ((self.mp2(tempro_fusion)))
-            tempro_fusion = self.MSTF_lif[i](tempro_fusion.reshape(T // self.multi_T[i], self.multi_T[i] * B, -1, H, W),
-                                             alpha)
+            tempro_fusion = split_contiguous_windows(
+                tempro_fusion.reshape(T, B, -1, H, W), self.multi_T[i]
+            )
+            tempro_fusion = self.MSTF_lif[i](tempro_fusion, alpha)
 
             tempro_fusion = tempro_fusion.permute(3, 4, 1, 2, 0).contiguous()  # H*W*B, C, T
             tempro_fusion = self.MSTF[i](tempro_fusion.flatten(0, 2))  # H*W*B, C, T
             tempro_fusion = tempro_fusion.view(H, W, B * self.multi_T[i], -1, T // self.multi_T[i]).permute(4, 2, 3, 0,
                                                                                                             1).contiguous()
-            tempro_fusion = tempro_fusion.reshape(T, B, -1, H, W)
+            tempro_fusion = restore_temporal_order(tempro_fusion, self.multi_T[i])
             head_output.append(tempro_fusion)
 
         x = torch.stack((list((head_output))), dim=0).reshape(-1, T, B, self.embeddim, H, W).contiguous()
@@ -404,18 +415,23 @@ class vit_snn(nn.Module):
             # x = blk(x,)
         return x.flatten(3).mean(3)
 
-    def forward(self, x, len_loader=0, epoch=0):
-        step_size = (len_loader // 2)
-        if self.training and epoch < self.STH_epoch:
-            if self.iter_num % step_size == 0:
-                if (1.0 - self.iter_num / (self.STH_epoch * len_loader)) > 0.0:
-                    # self.alpha = 0.0
-                    self.alpha = math.pow((1.0 - self.iter_num / (self.STH_epoch * len_loader)), 2.0)
-                else:
-                    self.alpha = 0.0
-                print(self.iter_num)
-                print(self.alpha)
-            self.iter_num += 1
+    def forward(self, x, len_loader=0, epoch=0, batch_idx=0):
+        # Twice-per-epoch quadratic STHOS, determined by epoch/batch (resume safe).
+        if not self.training:
+            self.alpha = 0.0
+        else:
+            endpoint = self.STH_epoch
+            if endpoint is None or endpoint == 0 or epoch >= endpoint:
+                self.alpha = 0.0
+            else:
+                if endpoint < 0 or epoch < 0 or len_loader < 1 or not 0 <= batch_idx < len_loader:
+                    raise ValueError("invalid STHOS epoch, endpoint, or batch position")
+                half = int(batch_idx >= (len_loader + 1) // 2)
+                initial = getattr(self, 'alpha_init', 1.0)
+                initial = 1.0 if initial is None else float(initial)
+                if not math.isfinite(initial) or not 0.0 <= initial <= 1.0:
+                    raise ValueError("alpha_init must be finite and within [0, 1]")
+                self.alpha = initial * (1.0 - (2 * epoch + half) / (2.0 * endpoint)) ** 2
         x = (x.unsqueeze(0)).repeat(self.T, 1, 1, 1, 1)
 
         x = self.forward_features(x)

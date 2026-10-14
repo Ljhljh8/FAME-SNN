@@ -85,7 +85,7 @@ parser.add_argument('--mlp-ratio', type=int, default=None, metavar='N',
 
 
 # Dataset / Model parameters "/Labd/dataset/cifar-10-batches-py/"
-parser.add_argument('-data-dir', metavar='DIR',default="/home/think/cifar100_data/",
+parser.add_argument('-data-dir', metavar='DIR',default="./data",
                     help='path to dataset')
 parser.add_argument('--dataset', '-d', metavar='NAME', default='torch/cifar100_tmp',
                     help='dataset type (default: ImageFolder/ImageTar if empty)')
@@ -309,6 +309,7 @@ def _parse_args():
 
 
 def main():
+    os.makedirs("logs", exist_ok=True)
     setup_default_logging(log_path=f"./logs/training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
     args, args_text = _parse_args()
 
@@ -676,7 +677,7 @@ def train_one_epoch(
             input = input.contiguous(memory_format=torch.channels_last)
 
         with amp_autocast():
-            output = model(input, len_loader, epoch)
+            output = model(input, len_loader, epoch, batch_idx=batch_idx)
             loss = loss_fn(output, target)
 
         pred_choice = output.data.max(1)[1]

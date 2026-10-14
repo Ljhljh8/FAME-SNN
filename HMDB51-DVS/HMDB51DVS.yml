@@ -3,9 +3,9 @@ distributed: True
 Test_only: False
 STHOS: 100
 alpha_init: 1.0
-time_step: 8
+time_step: 16
 layer: 2
-dim: 192
+dim: 384
 resume: ''
 drop_mlp: 0.
 attn_drop_rate: 0.
@@ -16,7 +16,8 @@ num_heads: 8
 patch_size: 4
 mlp_ratio: 4
 
-data_dir: /home/think/ucf101_dvs
+data_dir: ./data
+cache_root: ./data
 dataset: HMDB51
 num_classes: 51
 img_size: 224

@@ -297,6 +297,9 @@ parser.add_argument('--log-wandb', action='store_true', default=False,
 parser.add_argument("--Test_only",dest="test_only",default=False,help="Only test the model",action="store_true")
 
 
+parser.add_argument('--cache-root', default='', help='Existing temporal frame cache root')
+
+
 def _parse_args():
     # Do we have a config file to parse?
     args_config, remaining = config_parser.parse_known_args()
@@ -447,7 +450,7 @@ def to_float_tensor(x):
     return tensor
 
 
-def load_data(dataset_dir, distributed, T):
+def load_data(dataset_dir, distributed, T, cache_root=None, seed=42):
     # Data loading code
     print("Loading data")
 
@@ -463,8 +466,20 @@ def load_data(dataset_dir, distributed, T):
         tonic.transforms.ToFrame(sensor_size=sensor_size, n_time_bins=T), ])
     train_path = os.path.join(dataset_dir, "train")  # /home/think/ucf101_dvs/train
     test_path = os.path.join(dataset_dir, "test")
-    dataset_train = UCF101DVS(train_path, transform=train_transform)
-    dataset_test = UCF101DVS(test_path, transform=test_transform)
+    train_cache_path = os.path.join(cache_root or "./data", 'train_cache_{}'.format(T))
+    test_cache_path = os.path.join(cache_root or "./data", 'test_cache_{}'.format(T))
+    use_raw_data = os.path.isdir(train_path) and os.path.isdir(test_path)
+    if use_raw_data:
+        dataset_train = UCF101DVS(train_path, transform=train_transform)
+        dataset_test = UCF101DVS(test_path, transform=test_transform)
+    else:
+        if not (os.path.isdir(train_cache_path) and os.path.isdir(test_cache_path)):
+            raise FileNotFoundError(
+                'Neither raw train/test directories nor complete cached frames are available. '
+                'Expected {} and {}'.format(train_cache_path, test_cache_path))
+        print("Using cached UCF101-DVS frames without raw event files")
+        dataset_train = None
+        dataset_test = None
 
     train_transform = transforms.Compose([
         to_float_tensor,
@@ -475,20 +490,17 @@ def load_data(dataset_dir, distributed, T):
         transforms.Resize((224, 224), antialias=True),
     ])
     dataset_train = DiskCachedDataset(dataset_train,
-                                      cache_path=os.path.join(
-                                          "./",
-                                          'data/train_cache_{}'.format(T)),
+                                      cache_path=train_cache_path,
                                       transform=train_transform)
     dataset_test = DiskCachedDataset(dataset_test,
-                                     cache_path=os.path.join("./",
-                                                             'data/test_cache_{}'.format(T)),
+                                     cache_path=test_cache_path,
                                      transform=test_transform)
     print("Took", time.time() - st)
 
     print("Creating data loaders")
     if distributed:
-        train_sampler = torch.utils.data.distributed.DistributedSampler(dataset_train)
-        test_sampler = torch.utils.data.distributed.DistributedSampler(dataset_test)
+        train_sampler = torch.utils.data.distributed.DistributedSampler(dataset_train, seed=seed)
+        test_sampler = list(range(torch.distributed.get_rank(), len(dataset_test), torch.distributed.get_world_size()))
     else:
         train_sampler = torch.utils.data.RandomSampler(dataset_train)
         test_sampler = torch.utils.data.SequentialSampler(dataset_test)
@@ -497,6 +509,7 @@ def load_data(dataset_dir, distributed, T):
 
 
 def main():
+    os.makedirs("logs", exist_ok=True)
     setup_default_logging(log_path=f"./logs/training_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log")
     args, args_text = _parse_args()
 
@@ -508,7 +521,7 @@ def main():
                             "Metrics not being logged to wandb, try `pip install wandb`")
 
     args.prefetcher = not args.no_prefetcher
-    args.distributed = False
+    args.distributed = True
     args.local_rank = int(os.environ.get('LOCAL_RANK', 0))
     if 'WORLD_SIZE' in os.environ:
         args.distributed = int(os.environ['WORLD_SIZE']) > 1
@@ -671,7 +684,7 @@ def main():
         _logger.info('Scheduled epochs: {}'.format(num_epochs))
 
     data_path = args.data_dir
-    dataset_train, dataset_eval, train_sampler, test_sampler = load_data(data_path, args.distributed, args.time_step)
+    dataset_train, dataset_eval, train_sampler, test_sampler = load_data(data_path, args.distributed, args.time_step, args.cache_root, args.seed)
 
     # setup mixup / cutmix
     collate_fn = None
@@ -767,67 +780,67 @@ def main():
                 log_suffix=' (EMA)')
             eval_metrics = ema_eval_metrics
         return
-    # try:
-    #     for epoch in range(start_epoch, num_epochs):
-    #         if args.distributed and hasattr(loader_train.sampler, 'set_epoch'):
-    #             loader_train.sampler.set_epoch(epoch)
-    #
-    #         train_metrics = train_one_epoch(
-    #             epoch, model, loader_train, optimizer, train_loss_fn, args,
-    #             lr_scheduler=lr_scheduler, saver=saver, output_dir=output_dir,
-    #             amp_autocast=amp_autocast, loss_scaler=loss_scaler, model_ema=model_ema,
-    #             mixup_fn=mixup_fn, aug=train_snn_aug, trival_aug=train_trivalaug)
-    #
-    #         if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
-    #             if args.local_rank == 0:
-    #                 _logger.info("Distributing BatchNorm running means and vars")
-    #             distribute_bn(model, args.world_size, args.dist_bn == 'reduce')
-    #
-    #         eval_metrics = validate(model, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast)
-    #
-    #         if model_ema is not None and not args.model_ema_force_cpu:
-    #             if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
-    #                 distribute_bn(model_ema, args.world_size, args.dist_bn == 'reduce')
-    #             ema_eval_metrics = validate(
-    #                 model_ema.module, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast,
-    #                 log_suffix=' (EMA)')
-    #             eval_metrics = ema_eval_metrics
-    #
-    #         if lr_scheduler is not None:
-    #             # step LR for next epoch
-    #             lr_scheduler.step(epoch + 1, eval_metrics[eval_metric])
-    #
-    #         if output_dir is not None:
-    #             update_summary(
-    #                 epoch, train_metrics, eval_metrics, os.path.join(output_dir, 'summary.csv'),
-    #                 write_header=best_metric is None, log_wandb=args.log_wandb and has_wandb)
-    #
-    #         if saver is not None:
-    #             # save proper checkpoint with eval metric
-    #             save_metric = eval_metrics[eval_metric]
-    #             best_metric, best_epoch = saver.save_checkpoint(epoch, metric=save_metric)
-    #             _logger.info('*** Best metric: {0} (epoch {1})'.format(best_metric, best_epoch))
-    #
-    # except KeyboardInterrupt:
-    #     pass
-    # if best_metric is not None:
-    #     _logger.info('*** Best metric: {0} (epoch {1})'.format(best_metric, best_epoch))
-    print(args)
-    ts1 = time.time()
-    import sys
-    sys.path.append("..")
-    import energy_consumption_calculation
-    from energy_consumption_calculation.flops_counter import get_model_complexity_info
-    # using real data
-    Nops, Nparams = get_model_complexity_info(model, (3, 32, 32), loader_eval, as_strings=True,
-                                              print_per_layer_stat=True, verbose=True, syops_units='Mac',
-                                              param_units=' ', output_precision=3)
-    # using random input
-    #Nops, Nparams = get_model_complexity_info(model, (3,  32, 32), dataloader=None, as_strings=True, print_per_layer_stat=True, verbose=True, syops_units='Mac', param_units=' ', output_precision=3)
-    print("Nops: ", Nops)
-    print("Nparams: ", Nparams)
-    t_cost = (time.time() - ts1) / 60
-    print(f"Time cost: {t_cost} min")
+    try:
+        for epoch in range(start_epoch, num_epochs):
+            if args.distributed and hasattr(loader_train.sampler, 'set_epoch'):
+                loader_train.sampler.set_epoch(epoch)
+
+            train_metrics = train_one_epoch(
+                epoch, model, loader_train, optimizer, train_loss_fn, args,
+                lr_scheduler=lr_scheduler, saver=saver, output_dir=output_dir,
+                amp_autocast=amp_autocast, loss_scaler=loss_scaler, model_ema=model_ema,
+                mixup_fn=mixup_fn, aug=train_snn_aug, trival_aug=train_trivalaug)
+
+            if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
+                if args.local_rank == 0:
+                    _logger.info("Distributing BatchNorm running means and vars")
+                distribute_bn(model, args.world_size, args.dist_bn == 'reduce')
+
+            eval_metrics = validate(model, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast)
+
+            if model_ema is not None and not args.model_ema_force_cpu:
+                if args.distributed and args.dist_bn in ('broadcast', 'reduce'):
+                    distribute_bn(model_ema, args.world_size, args.dist_bn == 'reduce')
+                ema_eval_metrics = validate(
+                    model_ema.module, loader_eval, validate_loss_fn, args, amp_autocast=amp_autocast,
+                    log_suffix=' (EMA)')
+                eval_metrics = ema_eval_metrics
+
+            if lr_scheduler is not None:
+                # step LR for next epoch
+                lr_scheduler.step(epoch + 1, eval_metrics[eval_metric])
+
+            if output_dir is not None:
+                update_summary(
+                    epoch, train_metrics, eval_metrics, os.path.join(output_dir, 'summary.csv'),
+                    write_header=best_metric is None, log_wandb=args.log_wandb and has_wandb)
+
+            if saver is not None:
+                # save proper checkpoint with eval metric
+                save_metric = eval_metrics[eval_metric]
+                best_metric, best_epoch = saver.save_checkpoint(epoch, metric=save_metric)
+                _logger.info('*** Best metric: {0} (epoch {1})'.format(best_metric, best_epoch))
+
+    except KeyboardInterrupt:
+        pass
+    if best_metric is not None:
+        _logger.info('*** Best metric: {0} (epoch {1})'.format(best_metric, best_epoch))
+    # print(args)
+    # ts1 = time.time()
+    # import sys
+    # sys.path.append("..")
+    # import energy_consumption_calculation
+    # from energy_consumption_calculation.flops_counter import get_model_complexity_info
+    # # using real data
+    # Nops, Nparams = get_model_complexity_info(model, (3, 32, 32), loader_eval, as_strings=True,
+    #                                           print_per_layer_stat=True, verbose=True, syops_units='Mac',
+    #                                           param_units=' ', output_precision=3)
+    # # using random input
+    # #Nops, Nparams = get_model_complexity_info(model, (3,  32, 32), dataloader=None, as_strings=True, print_per_layer_stat=True, verbose=True, syops_units='Mac', param_units=' ', output_precision=3)
+    # print("Nops: ", Nops)
+    # print("Nparams: ", Nparams)
+    # t_cost = (time.time() - ts1) / 60
+    # print(f"Time cost: {t_cost} min")
 
 def train_one_epoch(
         epoch, model, loader, optimizer, loss_fn, args,
@@ -837,7 +850,8 @@ def train_one_epoch(
         # if args.prefetcher and loader.collate_fn.mixup_enabled:
         #     loader.collate_fn.mixup_enabled = False
         # elif mixup_fn is not None:
-        mixup_fn.mixup_enabled = False
+        if mixup_fn is not None:
+            mixup_fn.mixup_enabled = False
 
     second_order = hasattr(optimizer, 'is_second_order') and optimizer.is_second_order
     batch_time_m = AverageMeter()
@@ -878,15 +892,16 @@ def train_one_epoch(
             input = input.contiguous(memory_format=torch.channels_last)
 
         with amp_autocast():
-            output = model(input, len(loader), epoch)
+            output = model(input, len(loader), epoch, batch_idx=batch_idx)
             loss = loss_fn(output, target)
+        if not torch.isfinite(loss):
+            raise FloatingPointError('non-finite training loss')
 
         pred_choice = output.data.max(1)[1]
         labe = target.data.max(1)[1]
         correct = pred_choice.eq(labe.long().data).cpu().sum()
         mean_correct.append(correct.item() / float(input.size()[0]))
-        if not args.distributed:
-            losses_m.update(loss.item(), input.size(0))
+        losses_m.update(loss.item(), input.size(0))
 
         optimizer.zero_grad()
         if loss_scaler is not None:
@@ -917,9 +932,6 @@ def train_one_epoch(
             lrl = [param_group['lr'] for param_group in optimizer.param_groups]
             lr = sum(lrl) / len(lrl)
             train_instance_acc = np.mean(mean_correct) * 100
-            if args.distributed:
-                reduced_loss = reduce_tensor(loss.data, args.world_size)
-                losses_m.update(reduced_loss.item(), input.size(0))
 
             if args.local_rank == 0:
                 _logger.info(
@@ -962,73 +974,47 @@ def train_one_epoch(
     if hasattr(optimizer, 'sync_lookahead'):
         optimizer.sync_lookahead()
 
-    return OrderedDict([('loss', losses_m.avg), ('acc', train_instance_acc)])
+    totals = torch.tensor([losses_m.sum, losses_m.count, sum(mean_correct), len(mean_correct)],
+                          device='cuda', dtype=torch.float64)
+    if args.distributed:
+        torch.distributed.all_reduce(totals)
+    return OrderedDict(loss=(totals[0] / totals[1]).item(),
+                       acc=(100 * totals[2] / totals[3]).item())
 
 
 def validate(model, loader, loss_fn, args, amp_autocast=suppress, log_suffix=''):
-    batch_time_m = AverageMeter()
-    losses_m = AverageMeter()
-    top1_m = AverageMeter()
-    top5_m = AverageMeter()
-
+    # Evaluate each real sample exactly once; no padded DistributedSampler labels.
     model.eval()
-
-    end = time.time()
-    last_idx = len(loader) - 1
+    core = model.module if hasattr(model, 'module') else model
+    if args.distributed:
+        for buffer in core.buffers():
+            torch.distributed.broadcast(buffer, 0)
+    totals = torch.zeros(4, device='cuda', dtype=torch.float64)
     with torch.no_grad():
-        for batch_idx, (input, target) in enumerate(loader):
-            last_batch = batch_idx == last_idx
-            # if not args.prefetcher:
-            input = input.cuda()
-            target = target.cuda()
-            if args.channels_last:
-                input = input.contiguous(memory_format=torch.channels_last)
-
-            input = input.float()
+        for input, target in loader:
+            input, target = input.cuda().float(), target.cuda()
             with amp_autocast():
-                output = model(input, )
-            if isinstance(output, (tuple, list)):
-                output = output[0]
-
-            # augmentation reduction
-            reduce_factor = args.tta
-            if reduce_factor > 1:
-                output = output.unfold(0, reduce_factor, reduce_factor).mean(dim=2)
-                target = target[0:target.size(0):reduce_factor]
-
-            loss = loss_fn(output, target)
-            functional.reset_net(model)
-
-            acc1, acc5 = accuracy(output, target, topk=(1, 5))
-
-            if args.distributed:
-                reduced_loss = reduce_tensor(loss.data, args.world_size)
-                acc1 = reduce_tensor(acc1, args.world_size)
-                acc5 = reduce_tensor(acc5, args.world_size)
-            else:
-                reduced_loss = loss.data
-
-            torch.cuda.synchronize()
-
-            losses_m.update(reduced_loss.item(), input.size(0))
-            top1_m.update(acc1.item(), output.size(0))
-            top5_m.update(acc5.item(), output.size(0))
-
-            batch_time_m.update(time.time() - end)
-            end = time.time()
-            if args.local_rank == 0 and (last_batch):
-                log_name = 'Test' + log_suffix
-                _logger.info(
-                    '{0}: [{1:>4d}/{2}]  '
-                    'Time: {batch_time.val:.3f} ({batch_time.avg:.3f})  '
-                    'Loss: {loss.val:>7.4f} ({loss.avg:>6.4f})  '
-                    'Acc@1: {top1.val:>7.4f} ({top1.avg:>7.4f})  '
-                    'Acc@5: {top5.val:>7.4f} ({top5.avg:>7.4f})'.format(
-                        log_name, batch_idx, last_idx, batch_time=batch_time_m,
-                        loss=losses_m, top1=top1_m, top5=top5_m))
-
-    metrics = OrderedDict([ ('top1', top1_m.avg), ('top5', top5_m.avg), ('loss', losses_m.avg),])
-
+                output = core(input)
+                loss = loss_fn(output, target)
+            if not torch.isfinite(loss):
+                raise FloatingPointError('non-finite validation loss')
+            functional.reset_net(core)
+            prediction = output.topk(5, dim=1).indices
+            correct = prediction.eq(target[:, None])
+            totals += torch.stack((loss.double() * target.numel(),
+                                   correct[:, 0].sum().double(),
+                                   correct.any(dim=1).sum().double(),
+                                   torch.tensor(target.numel(), device='cuda', dtype=torch.float64)))
+    if args.distributed:
+        torch.distributed.all_reduce(totals)
+    loss_sum, top1, top5, count = totals.tolist()
+    if count != len(loader.dataset):
+        raise RuntimeError('evaluation sample count mismatch: %s != %s' % (count, len(loader.dataset)))
+    metrics = OrderedDict(top1=100.0 * top1 / count, top5=100.0 * top5 / count,
+                          loss=loss_sum / count, samples=int(count))
+    if args.rank == 0:
+        _logger.info('Test%s: samples=%d Loss=%.6f Acc@1=%.6f Acc@5=%.6f',
+                     log_suffix, count, metrics['loss'], metrics['top1'], metrics['top5'])
     return metrics
 
 

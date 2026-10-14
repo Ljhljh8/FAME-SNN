@@ -51,7 +51,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             samples, targets = mixup_fn(samples, targets)
 
         with torch.cuda.amp.autocast():
-            outputs = model(samples, len_loader, epoch)
+            outputs = model(samples, len_loader, epoch, batch_idx=data_iter_step)
             loss = criterion(outputs, targets)
 
         pred_choice = outputs.data.max(1)[1]

@@ -12,7 +12,7 @@ num_heads: 12
 patch_size: 4
 mlp_ratio: 4
 
-data_dir: /home/think/dvs128_data/
+data_dir: ./data
 dataset: dvs128
 num_classes: 11
 img_size: 128

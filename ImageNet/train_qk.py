@@ -36,7 +36,7 @@ from engine_finetune import train_one_epoch, evaluate
 
 def get_args_parser():
     # important params
-    parser = argparse.ArgumentParser('MAE fine-tuning for image classification', add_help=False)
+    parser = argparse.ArgumentParser('MAE fine-tuning for image classification')
     parser.add_argument('--batch_size', default=14, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
     parser.add_argument('--epochs', default=300, type=int)
@@ -45,7 +45,7 @@ def get_args_parser():
                         help='Accumulate gradient iterations (for increasing the effective batch size under memory constraints)')
     parser.add_argument('--finetune', default="",
                         help='finetune from checkpoint')
-    parser.add_argument('--data_path', default='/home/think/imagenet2012/', type=str,
+    parser.add_argument('--data_path', default='./data', type=str,
                         help='dataset path')
 
     # Model parameters
@@ -129,7 +129,7 @@ def get_args_parser():
     parser.add_argument('--device', default='cuda',
                         help='device to use for training / testing')
     parser.add_argument('--seed', default=0, type=int)
-    parser.add_argument('--resume', default='/media/think/data1/ljh/FAME-SNN/Imagenet/output_dir_FAMESNN/checkpoint-294.pth',
+    parser.add_argument('--resume', default='',
                         help='resume from checkpoint')
 
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
