@@ -85,7 +85,7 @@ parser.add_argument('--mlp-ratio', type=int, default=None, metavar='N',
 
 
 # Dataset / Model parameters "/Labd/dataset/cifar-10-batches-py/"
-parser.add_argument('-data-dir', metavar='DIR',default="./data",
+parser.add_argument('-data-dir', metavar='DIR',default="/home/think/cifar100_data/",
                     help='path to dataset')
 parser.add_argument('--dataset', '-d', metavar='NAME', default='torch/cifar100_tmp',
                     help='dataset type (default: ImageFolder/ImageTar if empty)')

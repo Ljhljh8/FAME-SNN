@@ -16,8 +16,8 @@ num_heads: 8
 patch_size: 4
 mlp_ratio: 4
 
-data_dir: ./data
-cache_root: ./data
+data_dir: /home/think/ljh_datasets/HMDBDVS
+cache_root: /home/think/ljh_datasets/HMDBDVS
 dataset: HMDB51
 num_classes: 51
 img_size: 224

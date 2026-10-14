@@ -15,7 +15,7 @@ num_heads: 8
 patch_size: 4
 mlp_ratio: 4
 
-data_dir: ./data
+data_dir: /home/think/ljh_datasets/UCF101/ucf101_dvs
 dataset: ucf101
 num_classes: 101
 img_size: 224

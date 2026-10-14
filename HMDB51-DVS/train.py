@@ -101,7 +101,7 @@ parser.add_argument('--pretrained', action='store_true', default=False,
 parser.add_argument('--initial-checkpoint', default='', type=str, metavar='PATH',
                     help='Initialize model from this checkpoint (default: none)')
 
-parser.add_argument('--resume', default='', type=str, metavar='PATH',
+parser.add_argument('--resume', default='/media/think/data1/ljh/FAME-SNN/HMDBdvs/output/train/20250121-152545-MS_FAST-224/model_best.pth.tar', type=str, metavar='PATH',
                     help='Resume full model and optimizer state from checkpoint (default: none)')
 parser.add_argument('--no-resume-opt', action='store_true', default=False,
                     help='prevent resume of optimizer state when resuming model')

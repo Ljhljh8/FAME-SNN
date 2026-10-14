@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Launch the UCF101-DVS FAME_SNN job on both hosts (8 GPUs per host, 16 GPUs total).
 # Start this script concurrently on both machines:
-#   node 0: MASTER_ADDR=<node-0-address> bash run.sh 0
-#   node 1: MASTER_ADDR=<node-0-address> bash run.sh 1
+#   4090-136: ./run.sh 0
+#   4090-48 : ./run.sh 1
 # Optional overrides, which must be identical on both hosts:
 #   EXPERIMENT=name PER_GPU_BATCH=32 ./run.sh <node_rank>
 # Set DATA_DIR only when deliberately using raw train/ and test/ event files.
@@ -16,20 +16,35 @@ fi
 NODE_RANK="$1"
 shift
 case "$NODE_RANK" in
-    0|1) ;;
-    *) echo "ERROR: node_rank must be 0 or 1, got: $NODE_RANK" >&2; exit 64 ;;
+    0)
+        EXPECTED_HOST="4090-136"
+        MASTER_ADDR="${MASTER_ADDR:-10.200.22.136}"
+        ;;
+    1)
+        EXPECTED_HOST="4090-48"
+        MASTER_ADDR="${MASTER_ADDR:-10.200.22.136}"
+        ;;
+    *)
+        echo "ERROR: node_rank must be 0 (4090-136) or 1 (4090-48), got: $NODE_RANK" >&2
+        exit 64
+        ;;
 esac
-MASTER_ADDR="${MASTER_ADDR:?Set MASTER_ADDR to the address of node 0 reachable from both nodes}"
+
 HOST="$(hostname -s)"
+if [[ "$HOST" != "$EXPECTED_HOST" ]]; then
+    echo "ERROR: node_rank $NODE_RANK must run on $EXPECTED_HOST, but this host is $HOST" >&2
+    exit 65
+fi
 
 PROJECT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
-PYTHON="${PYTHON:-python3}"
+CONDA_ENV="/home/aigc/anaconda3/envs/fame_snn_py38_cu118"
+PYTHON="$CONDA_ENV/bin/python"
+TORCHRUN="$CONDA_ENV/bin/torchrun"
 CONFIG="${CONFIG:-$PROJECT_DIR/UCF101DVS.yml}"
 # Raw data is optional: the transferred HDF5 frame caches are the default input.
 DATA_DIR="${DATA_DIR:-}"
 CACHE_TIME_STEP="${CACHE_TIME_STEP:-8}"
-CACHE_ROOT="${CACHE_ROOT:-$PROJECT_DIR/data}"
-OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_DIR/output}"
+OUTPUT_ROOT="${OUTPUT_ROOT:-$PROJECT_DIR/output}"
 EXPERIMENT="${EXPERIMENT:-ucf101dvs_ddp16}"
 MASTER_PORT="${MASTER_PORT:-29517}"
 NNODES=2
@@ -43,7 +58,8 @@ fail() {
     exit 2
 }
 
-command -v "$PYTHON" >/dev/null || fail "Python executable is missing: $PYTHON"
+[[ -x "$PYTHON" ]] || fail "Python environment is missing: $PYTHON"
+[[ -x "$TORCHRUN" ]] || fail "torchrun is missing: $TORCHRUN"
 [[ -f "$CONFIG" ]] || fail "Config is missing: $CONFIG"
 # train.py creates its rotating log before it parses arguments or initializes DDP.
 mkdir -p "$PROJECT_DIR/logs"
@@ -52,8 +68,8 @@ if [[ -n "$DATA_DIR" ]]; then
     [[ -d "$DATA_DIR/test" ]] || fail "Raw test data is missing: $DATA_DIR/test"
     DATA_MODE="raw_events"
 else
-    [[ -d "$CACHE_ROOT/train_cache_$CACHE_TIME_STEP" ]] || fail "Cached training frames are missing"
-    [[ -d "$CACHE_ROOT/test_cache_$CACHE_TIME_STEP" ]] || fail "Cached test frames are missing"
+    [[ -d "$PROJECT_DIR/data/train_cache_$CACHE_TIME_STEP" ]] || fail "Cached training frames are missing"
+    [[ -d "$PROJECT_DIR/data/test_cache_$CACHE_TIME_STEP" ]] || fail "Cached test frames are missing"
     DATA_MODE="cached_frames"
 fi
 
@@ -68,7 +84,8 @@ if torch.cuda.device_count() != 8:
 print('ENVIRONMENT_OK torch=%s cuda=%s gpus=%d' % (torch.__version__, torch.version.cuda, torch.cuda.device_count()))
 PY
 
-# Set NCCL_SOCKET_IFNAME externally if a specific network interface is needed.
+# The two nodes have verified routes on bond0 (10.200.22.0/24).
+export NCCL_SOCKET_IFNAME="${NCCL_SOCKET_IFNAME:-bond0}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export NCCL_ASYNC_ERROR_HANDLING="${NCCL_ASYNC_ERROR_HANDLING:-1}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
@@ -90,13 +107,13 @@ fi
 GLOBAL_BATCH=$((NNODES * GPUS_PER_NODE * PER_GPU_BATCH))
 printf 'LAUNCH host=%s node_rank=%s nnodes=%s gpus_per_node=%s global_batch=%s\n' \
     "$HOST" "$NODE_RANK" "$NNODES" "$GPUS_PER_NODE" "$GLOBAL_BATCH"
-printf 'DATA_MODE=%s DATA_DIR=%s CONFIG=%s OUTPUT_DIR=%s EXPERIMENT=%s\n' \
-    "$DATA_MODE" "${DATA_DIR:-<cache-only>}" "$CONFIG" "$OUTPUT_DIR" "$EXPERIMENT"
+printf 'DATA_MODE=%s DATA_DIR=%s CONFIG=%s OUTPUT_ROOT=%s EXPERIMENT=%s\n' \
+    "$DATA_MODE" "${DATA_DIR:-<cache-only>}" "$CONFIG" "$OUTPUT_ROOT" "$EXPERIMENT"
 printf 'NCCL_SOCKET_IFNAME=%s MASTER=%s:%s\n' \
-    "${NCCL_SOCKET_IFNAME:-<auto>}" "$MASTER_ADDR" "$MASTER_PORT"
+    "$NCCL_SOCKET_IFNAME" "$MASTER_ADDR" "$MASTER_PORT"
 
 cd "$PROJECT_DIR"
-exec "$PYTHON" -m torch.distributed.run \
+exec "$TORCHRUN" \
     --nnodes="$NNODES" \
     --nproc_per_node="$GPUS_PER_NODE" \
     --node_rank="$NODE_RANK" \
@@ -105,11 +122,10 @@ exec "$PYTHON" -m torch.distributed.run \
     train.py \
     -c "$CONFIG" \
     -data-dir "$DATA_DIR" \
-    --cache-root "$CACHE_ROOT" \
     --batch-size "$PER_GPU_BATCH" \
     --val-batch-size "$VAL_PER_GPU_BATCH" \
     --workers "$WORKERS" \
-    --output "$OUTPUT_DIR" \
+    --output "$OUTPUT_ROOT" \
     --experiment "$EXPERIMENT" \
     --amp \
     "$@"
